@@ -7,6 +7,15 @@ description: |
   then add this monitor through the Server Events screen on a Linux amd64 server.
   This does not redirect the existing native-Sigma artifact or monitor.
 
+  Deprecated, unsupported, and noisy rules remain disabled unless their Enable
+  options are selected. MinimumLevel still applies. CustomRulesPath optionally
+  selects an absolute YAML rule file or directory on the Linux server, accessible
+  to its service account. It replaces bundled rule selection while retaining the
+  bundled configuration; empty uses bundled rules. The analyzer rejects invalid
+  nonempty paths without falling back. These options are forwarded for each flow.
+  More rules can require a longer AnalysisTimeout (default 3600 seconds here);
+  this monitor supplies that limit explicitly when scheduling server analysis.
+
   Each matching client flow schedules a separate server analysis collection.
   Analyses run serially within this monitor; later completion events wait while
   the current scan finishes. Temporary files are removed when each analysis
@@ -63,6 +72,22 @@ parameters:
     type: int
     default: '2'
     description: Hayabusa worker threads per analysis (1-64).
+  - name: EnableDeprecatedRules
+    type: bool
+    default: N
+    description: Opt into rules with deprecated status; MinimumLevel still applies.
+  - name: EnableUnsupportedRules
+    type: bool
+    default: N
+    description: Opt into rules with unsupported status; MinimumLevel still applies.
+  - name: EnableNoisyRules
+    type: bool
+    default: N
+    description: Opt into rules listed as noisy in the bundled configuration; MinimumLevel still applies.
+  - name: CustomRulesPath
+    type: string
+    default: ''
+    description: Optional absolute path to an existing YAML rule file or directory on the Linux server. Replaces bundled rule selection; empty uses bundled rules.
   - name: AnalysisTimeout
     type: int
     default: '3600'
@@ -99,7 +124,10 @@ sources:
         LET Analysis <= collect_client(client_id="server",
             artifacts="Server.Analysis.Windows.EventLogs.HayabusaEngine",
             env=dict(ClientId=InputClientId, FlowId=InputFlowId,
-                     EvtxRegex=EvtxRegex, MinimumLevel=MinimumLevel, Threads=Threads),
+                     EvtxRegex=EvtxRegex, MinimumLevel=MinimumLevel, Threads=Threads,
+                     EnableDeprecatedRules=EnableDeprecatedRules,
+                     EnableUnsupportedRules=EnableUnsupportedRules,
+                     EnableNoisyRules=EnableNoisyRules, CustomRulesPath=CustomRulesPath),
             timeout=AnalysisTimeout, max_rows=AnalysisMaxRows, max_bytes=AnalysisMaxBytes)
         LET Deadline <= now() + AnalysisTimeout + 60
         LET Finished <= SELECT * FROM if(condition=Analysis.flow_id, then={

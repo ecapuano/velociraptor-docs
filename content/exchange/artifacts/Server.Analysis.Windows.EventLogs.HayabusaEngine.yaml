@@ -14,10 +14,27 @@ description: |
   The hash-pinned Hayabusa 4.3.0 bundle includes its rules and configuration.
   It produces unsorted verbose JSONL using the package's default rule selection
   with a minimum severity of medium. Select informational to include all levels.
-  Deprecated, unsupported, and noisy rules are not explicitly enabled.
+  Deprecated, unsupported, and noisy rules are disabled by default; their three
+  Enable options opt in independently. MinimumLevel still applies to those rules.
+  Enabling noisy rules uses the bundled noisy-rule list and does not override
+  the bundled excluded-rule list.
+
+  CustomRulesPath selects an existing YAML rule file or directory on the Linux
+  server, accessible to the Velociraptor service account. It replaces the bundled
+  rule selection rather than adding to it. Leave it empty to use bundled rules.
+  Hayabusa still uses the bundled rule configuration (aliases, exclusions, noisy
+  IDs, and profiles). No custom files are downloaded or uploaded by this option.
+  Nonempty relative, missing, or non-file/directory paths are rejected without
+  falling back to bundled rules. Invalid or unreadable rule contents are reported
+  by Hayabusa; review collection logs and diagnostic outputs.
+
   Thread count limits Hayabusa worker threads, not total memory or CPU usage.
   Large collections still need adequate memory, temporary disk, and collection
-  timeout, row, and upload limits. No fixed performance or memory guarantee applies.
+  timeout, row, and upload limits. On tested Velociraptor 0.77.2/0.77.3, server
+  collections with no explicit timeout use 600 seconds. Set an appropriate timeout
+  when scheduling this artifact; the companion monitor explicitly defaults to
+  AnalysisTimeout=3600 seconds. Rule expansion can increase scan time. No fixed
+  performance or memory guarantee applies.
 
   Results contain Kind=Detection rows with Hayabusa fields and the input ClientId
   and FlowId. Kind=Timeline and Kind=Manifest rows link to the complete JSONL and
@@ -90,6 +107,23 @@ parameters:
     default: '2'
     description: Hayabusa worker threads (1-64). This is not a memory or CPU quota.
 
+  - name: EnableDeprecatedRules
+    type: bool
+    default: N
+    description: Opt into rules with deprecated status; MinimumLevel still applies.
+  - name: EnableUnsupportedRules
+    type: bool
+    default: N
+    description: Opt into rules with unsupported status; MinimumLevel still applies.
+  - name: EnableNoisyRules
+    type: bool
+    default: N
+    description: Opt into rules listed as noisy in the bundled configuration; MinimumLevel still applies.
+  - name: CustomRulesPath
+    type: string
+    default: ''
+    description: Optional absolute path to an existing YAML rule file or directory on the Linux server. Replaces bundled rule selection; empty uses bundled rules.
+
 precondition: SELECT * FROM info() WHERE OS = 'linux' AND Architecture = 'amd64'
 
 sources:
@@ -102,7 +136,15 @@ sources:
       LET S = scope()
       LET InputClientId <= ClientId
       LET InputFlowId <= FlowId
-      LET ValidParameters <= ClientId AND FlowId AND Threads > 0 AND Threads <= 64
+      LET CustomRulesInfo <= SELECT IsDir, Mode.IsRegular AS IsFile
+        FROM if(condition=CustomRulesPath AND CustomRulesPath =~ "^/", then={
+          SELECT * FROM stat(filename=CustomRulesPath)
+        })
+        WHERE IsDir OR IsFile
+      LET CustomRulesValid <= NOT CustomRulesPath OR CustomRulesInfo
+      LET _ <= if(condition=NOT CustomRulesValid,
+          then=log(level="ERROR", message="CustomRulesPath must be an existing absolute path to a readable YAML file or directory on this Linux server; bundled rules will not be used."))
+      LET ValidParameters <= CustomRulesValid AND ClientId AND FlowId AND Threads > 0 AND Threads <= 64
           AND MinimumLevel IN ("informational", "low", "medium", "high", "critical")
       LET Inputs <= SELECT vfs_path,
                            client_path,
@@ -115,7 +157,7 @@ sources:
                 else={
           SELECT *
           FROM scope()
-          WHERE log(level="ERROR", message="ClientId and FlowId are required; Threads must be 1-64 and MinimumLevel must be a listed level.")
+          WHERE log(level="ERROR", message="ClientId and FlowId are required; Threads must be 1-64, MinimumLevel must be a listed level, and CustomRulesPath must be empty or valid.")
             AND FALSE
         })
         WHERE NOT S.Type = "idx"
@@ -200,11 +242,16 @@ sources:
         FROM if(condition=HBExe,
                 then={
           SELECT *
-          FROM execve(argv=[HBExe, "dfir-timeline", "--directory",
+          FROM execve(argv=filter(list=[HBExe, "dfir-timeline", "--directory",
                       EvtxDir, "--output-type", "jsonl", "--output", Timeline,
                       "--no-wizard", "--profile", "verbose", "--iso-8601",
                       "--min-level", MinimumLevel, "--threads", str(str=Threads),
-                      "--no-color", "--no-summary"],
+                      "--no-color", "--no-summary",
+                      if(condition=EnableDeprecatedRules, then="--enable-deprecated-rules"),
+                      if(condition=EnableUnsupportedRules, then="--enable-unsupported-rules"),
+                      if(condition=EnableNoisyRules, then="--enable-noisy-rules"),
+                      if(condition=CustomRulesPath, then="--rules"),
+                      if(condition=CustomRulesPath, then=CustomRulesPath)], regex=".+"),
                       cwd=HayabusaDir,
                       sep="\n",
                       length=65536)
